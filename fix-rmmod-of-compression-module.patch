@@ -1,0 +1,55 @@
+From jasonuhl@sgi.com Mon Mar  7 19:42:56 2005
+Date: Mon, 7 Mar 2005 19:42:56 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Unconfigure if removing current compression type
+Message-ID: <20050308034256.GE98711@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 1348
+Lines: 40
+
+If we have compression types modularized and we're rmmoding the one
+we're currently configured to use, we need to unconfigure.
+
+Index: linux/drivers/dump/dump_setup.c
+===================================================================
+--- linux.orig/drivers/dump/dump_setup.c	2005-03-07 18:58:13.445625733 -0800
++++ linux/drivers/dump/dump_setup.c	2005-03-07 18:58:46.451763066 -0800
+@@ -375,13 +375,26 @@
+ 	struct __dump_compress *dc;
+ 
+ 	/* let's make sure our list is valid */
+-	if (compression_type != DUMP_COMPRESS_NONE) {
+-		list_for_each(tmp, &dump_compress_list) {
+-			dc = list_entry(tmp, struct __dump_compress, list);
+-			if (dc->compress_type == compression_type) {
+-				list_del(&(dc->list));
+-				break;
++	if (compression_type == DUMP_COMPRESS_NONE)
++		return;
++	list_for_each(tmp, &dump_compress_list) {
++		dc = list_entry(tmp, struct __dump_compress, list);
++		if (dc->compress_type == compression_type) {
++			/*
++			 * If we're currently configured to dump using
++			 * the compression mechanism we're removing,
++			 * unconfigure ourselves.
++			 */
++			if (dump_config.dumper &&
++			    dump_config.dumper->compress == dc) {
++				dump_okay = 0;
++				dump_unconfigure();
++				dump_config.flags &= ~DUMP_FLAGS_TARGETMASK;
++				dump_dev = NULL;
++				dump_config.dumper = NULL;
+ 			}
++			list_del(&(dc->list));
++			break;
+ 		}
+ 	}
+ }
+

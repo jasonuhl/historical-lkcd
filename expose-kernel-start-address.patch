@@ -1,0 +1,180 @@
+From jasonuhl@sgi.com Mon Feb 14 21:04:24 2005
+Date: Mon, 14 Feb 2005 21:04:24 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Expose kernel start address
+Message-ID: <20050215050424.GA510352@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 5328
+Lines: 165
+
+This adds an element to the ia64 asm header to store the kernel start
+address (needed by lcrash), and also adds an interface for lcrash to
+get the start address when analyzing a live system.
+
+lcrash already has the necessary code to take advantage of this.
+
+
+Index: linux/drivers/dump/dump_i386.c
+===================================================================
+--- linux.orig/drivers/dump/dump_i386.c	2005-02-02 15:24:14.000000000 -0800
++++ linux/drivers/dump/dump_i386.c	2005-02-11 16:13:31.022068280 -0800
+@@ -290,6 +290,20 @@
+ }
+ 
+ /*
++ * Name: __dump_kernel_addr()
++ * Func: Return physical kernel load address.
++ */
++unsigned long
++__dump_kernel_addr(void)
++{
++	/* Unsatisfactory - arch/i386/kernel/vmlinux.lds.S hard codes the
++	 * offset to the start of the text.  It should be a global arch
++	 * specific define.
++	 */
++	return virt_to_phys((void *)(0xC0000000 + 0x100000));
++}
++
++/*
+  * Name: __dump_configure_header()
+  * Func: Meant to fill in arch specific header fields except per-cpu state
+  * already captured via __dump_save_context for all CPUs.
+Index: linux/drivers/dump/dump_ia64.c
+===================================================================
+--- linux.orig/drivers/dump/dump_ia64.c	2005-02-02 15:24:14.000000000 -0800
++++ linux/drivers/dump/dump_ia64.c	2005-02-11 16:13:31.028904272 -0800
+@@ -276,12 +276,23 @@
+ }
+ 
+ /*
++ * Name: __dump_kernel_addr()
++ * Func: Return physical kernel load address.
++ */
++unsigned long
++__dump_kernel_addr(void)
++{
++	return ia64_tpa(KERNEL_START);
++}
++
++/*
+  * Name: __dump_configure_header()
+  * Func: Configure the dump header with all proper values.
+  */
+ int
+ __dump_configure_header(const struct pt_regs *regs)
+ {
++	dump_header_asm.dha_kernel_addr = __dump_kernel_addr();
+ 	return (0);
+ }
+ 
+Index: linux/drivers/dump/dump_ppc64.c
+===================================================================
+--- linux.orig/drivers/dump/dump_ppc64.c	2005-02-02 15:24:14.000000000 -0800
++++ linux/drivers/dump/dump_ppc64.c	2005-02-11 16:13:31.034763694 -0800
+@@ -228,6 +228,16 @@
+ }
+ 
+ /*
++ * Name: __dump_kernel_addr()
++ * Func: Return physical kernel load address.
++ */
++unsigned long
++__dump_kernel_addr(void)
++{
++	return 0 /* FIXME */ ;
++}
++
++/*
+  * Name: __dump_configure_header()
+  * Func: Configure the dump header with all proper values.
+  */
+Index: linux/drivers/dump/dump_setup.c
+===================================================================
+--- linux.orig/drivers/dump/dump_setup.c	2005-02-11 11:33:42.698623391 -0800
++++ linux/drivers/dump/dump_setup.c	2005-02-14 15:59:08.386327535 -0800
+@@ -610,7 +610,10 @@
+ 
+ 		/* Take the dump */
+ 		return	manual_handle_crashdump();
+-			
++
++	case DIOGKERNELADDR: /* get the kernel physical load address */
++		return put_user(__dump_kernel_addr(), (long *)arg);
++
+ 	default:
+ 		/* 
+ 		 * these are network dump specific ioctls, let the
+Index: linux/drivers/dump/dump_x8664.c
+===================================================================
+--- linux.orig/drivers/dump/dump_x8664.c	2005-02-02 15:24:14.000000000 -0800
++++ linux/drivers/dump/dump_x8664.c	2005-02-11 16:13:31.046482538 -0800
+@@ -263,6 +263,20 @@
+ }
+ 
+ /*
++ * Name: __dump_kernel_addr()
++ * Func: Return physical kernel load address.
++ */
++unsigned long
++__dump_kernel_addr(void)
++{
++	/* Unsatisfactory - arch/x86_64/kernel/vmlinux.lds.S hard codes the
++	 * offset to the start of the text.  It should be a global arch
++	 * specific define.
++	 */
++	return virt_to_phys((void *)0xffffffff80100000UL);
++}
++
++/*
+  * Name: __dump_configure_header()
+  * Func: Configure the dump header with all proper values.
+  */
+Index: linux/include/asm-ia64/dump.h
+===================================================================
+--- linux.orig/include/asm-ia64/dump.h	2005-02-02 15:24:14.000000000 -0800
++++ linux/include/asm-ia64/dump.h	2005-02-11 16:13:31.065037373 -0800
+@@ -14,7 +14,7 @@
+ 
+ /* definitions */
+ #define DUMP_ASM_MAGIC_NUMBER     0xdeaddeadULL  /* magic number            */
+-#define DUMP_ASM_VERSION_NUMBER   0x4            /* version number          */
++#define DUMP_ASM_VERSION_NUMBER   0x5            /* version number          */
+ 
+ #ifdef __KERNEL__
+ #include <linux/efi.h>
+@@ -89,6 +89,9 @@
+         /* the size of this header (in case we can't read it) */
+         uint32_t             dha_header_size;
+ 
++        /* load address of kernel */
++        uint64_t             dha_kernel_addr;
++
+         /* pointer to pt_regs, (OLD: (struct pt_regs *, NEW: (uint64_t)) */
+ 	uint64_t             dha_pt_regs;
+ 
+Index: linux/include/linux/dump.h
+===================================================================
+--- linux.orig/include/linux/dump.h	2005-02-11 11:33:42.707412524 -0800
++++ linux/include/linux/dump.h	2005-02-14 15:59:08.518164520 -0800
+@@ -179,6 +179,7 @@
+ #define DIOGETHADDR     _IOR('p', 0xAF, unsigned int) /* get ethernet address       */
+ #define DIOGDUMPOKAY	_IOR('p', 0xB0, unsigned int) /* check if dump is configured      */
+ #define DIOSDUMPTAKE    _IOW('p', 0xB1, unsigned int) /* Take a manual dump               */
++#define DIOGKERNELADDR	_IOR('p', 0xB2, unsigned int) /* get the physical kernel load address */
+ 
+ /*
+  * Structure: __dump_header
+@@ -393,6 +394,7 @@
+ #else
+ #define 	__dump_save_other_cpus()
+ #endif
++extern unsigned long __dump_kernel_addr(void);
+ 
+ extern int manual_handle_crashdump(void);
+ 
+

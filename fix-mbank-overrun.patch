@@ -1,0 +1,76 @@
+From jasonuhl@sgi.com Tue Nov 15 23:55:34 2005
+Date: Tue, 15 Nov 2005 23:55:34 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Fix overrun when num_mbanks > MAX_NUMNODES
+Message-ID: <20051116075534.GB75307@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 2658
+Lines: 61
+
+In dump_reconfigure_mbanks() we save the start and end locations of
+each mbank we find (there can be several per node), but the arrays in
+struct dump_data_filter are only big enough for one per node.  This is
+causing overruns on large SGI Altix systems (which actually have
+MAX_NUMNODES nodes, or nearly so).
+
+The following makes room for up to 8 mbanks per node.  It's unfortunate
+that we have to hardcode a value here (the theoretical maximum number of
+mbanks per node is unknowable in any arch-independent way), but 8 will
+hopefully be enough for everyone, and if it ever isn't we'll gracefully
+print a warning and dump what we can.
+
+
+Index: linux/drivers/dump/dump_methods.h
+===================================================================
+--- linux.orig/drivers/dump/dump_methods.h	2005-11-15 23:05:17.169735417 -0800
++++ linux/drivers/dump/dump_methods.h	2005-11-15 23:06:22.664583910 -0800
+@@ -47,6 +47,8 @@
+ 
+ #define MAX_PASSES 	6
+ #define MAX_DEVS	4
++#define MAX_MBANKS_PER_NODE	8
++#define MAX_MBANKS	(MAX_NUMNODES * MAX_MBANKS_PER_NODE)
+ 
+ 
+ /* To customise selection of pages to be dumped in a given pass/group */
+@@ -54,7 +56,7 @@
+ 	char name[32];
+ 	int (*selector)(int, unsigned long, unsigned long);
+ 	ulong level_mask; /* dump level(s) for which this filter applies */
+-	loff_t start[MAX_NUMNODES], end[MAX_NUMNODES]; /* location range applicable */
++	loff_t start[MAX_MBANKS], end[MAX_MBANKS]; /* location range applicable */
+ 	ulong num_mbanks;  /* Number of memory banks. Greater than one for discontig memory (NUMA) */
+ };
+ 
+Index: linux/drivers/dump/dump_scheme.c
+===================================================================
+--- linux.orig/drivers/dump/dump_scheme.c	2005-11-15 23:05:17.172665136 -0800
++++ linux/drivers/dump/dump_scheme.c	2005-11-15 23:06:22.665560483 -0800
+@@ -369,6 +369,11 @@
+                         if(!(__dump_page_valid(loc >> PAGE_SHIFT)))
+                                 continue;
+ 
++                        if (i == MAX_MBANKS) {
++				printk("Too many mbanks.  Dump will be incomplete.\n");
++				break;
++			}
++
+                         /* We found a valid page. This is the start */
+                         filter->start[i] = loc;
+ 
+@@ -393,8 +398,8 @@
+                 for(i = 0; i < dump_config.dumper->filter->num_mbanks; i++) {
+                         filter->start[i] = dump_config.dumper->filter->start[i];
+                         filter->end[i] = dump_config.dumper->filter->end[i];
+-                        filter->num_mbanks = dump_config.dumper->filter->num_mbanks;
+                 }
++                filter->num_mbanks = dump_config.dumper->filter->num_mbanks;
+         }
+ }
+ #endif
+

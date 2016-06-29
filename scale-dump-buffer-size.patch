@@ -1,0 +1,109 @@
+From jasonuhl@sgi.com Tue Dec 14 00:33:18 2004
+Date: Tue, 14 Dec 2004 00:33:18 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Scale dump buffer to large cpu counts
+Message-ID: <20041214083318.GA172283@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.4.2i
+Status: RO
+Content-Length: 3317
+Lines: 94
+
+Scale the size of the dump buffer according to the number
+of cpus.  Required to dump systems with a lot of cpus.
+
+-- 
+Index: linux/drivers/dump/Makefile
+===================================================================
+--- linux.orig/drivers/dump/Makefile	2004-12-13 16:20:38.230706773 -0800
++++ linux/drivers/dump/Makefile	2004-12-13 16:20:42.142843781 -0800
+@@ -20,3 +20,31 @@
+ obj-$(CONFIG_CRASH_DUMP_NETDEV)	+= dump_netdev.o
+ obj-$(CONFIG_CRASH_DUMP_COMPRESS_RLE)	+= dump_rle.o
+ obj-$(CONFIG_CRASH_DUMP_COMPRESS_GZIP)	+= dump_gzip.o
++
++config_nr_cpus := 1
++ifdef CONFIG_SMP
++  config_nr_cpus := 32
++endif
++ifdef CONFIG_NR_CPUS
++  config_nr_cpus := $(CONFIG_NR_CPUS)
++endif
++config_pagesize := 4    # Lowest common denominator
++ifdef CONFIG_IA64_PAGE_SIZE_8KB
++  config_pagesize := 8
++endif
++ifdef CONFIG_IA64_PAGE_SIZE_16KB
++  config_pagesize := 16
++endif
++ifdef CONFIG_IA64_PAGE_SIZE_64KB
++  config_pagesize := 64
++endif
++
++# ia64 asm header needs ~160 bytes + sizeof(struct pt_regs) per cpu.  Call it
++# 900 bytes to be safe.
++EXTRA_CFLAGS += -DDUMP_BUFFER_SIZE_MIN=$(shell $(AWK) \
++        'BEGIN{ \
++        size=int(($(config_nr_cpus))*900/1024); \
++        size=int((size+$(config_pagesize)-1)/$(config_pagesize))*$(config_pagesize); \
++        print size*1024; \
++        stop; \
++        }')
+Index: linux/drivers/dump/dump_fmt.c
+===================================================================
+--- linux.orig/drivers/dump/dump_fmt.c	2004-12-13 16:20:38.230706773 -0800
++++ linux/drivers/dump/dump_fmt.c	2004-12-13 16:20:42.143820350 -0800
+@@ -127,6 +127,7 @@
+ 		compress_type;
+ 	dump_header.dh_dump_flags = dump_config.flags;
+ 	dump_header.dh_dump_device = dump_config.dumper->dev->device_id; 
++	dump_header.dh_dump_buffer_size = DUMP_BUFFER_SIZE;
+ 
+ #if DUMP_DEBUG >= 6
+ 	dump_header.dh_num_bytes = 0;
+Index: linux/include/linux/dump.h
+===================================================================
+--- linux.orig/include/linux/dump.h	2004-12-13 16:20:38.231683343 -0800
++++ linux/include/linux/dump.h	2004-12-13 16:20:42.144796919 -0800
+@@ -79,19 +79,26 @@
+  *   
+  *  = 256k for page size >= 64k
+  *  = 64k  for page size < 64k
++ *  If DUMP_BUFFER_SIZE_MIN (defined in drivers/dump/Makefile) is larger than
++ *  DUMP_BUFFER_SIZE then use DUMP_BUFFER_SIZE_MIN instead.
+  */
+ #if (PAGE_SHIFT >= 16)
++#undef	DUMP_BUFFER_SIZE
+ #define DUMP_BUFFER_SIZE	(256 * 1024)  /* size of dump buffer         */
+ #else
+ #define DUMP_BUFFER_SIZE	(64 * 1024)  /* size of dump buffer         */
+ #endif
++#if DUMP_BUFFER_SIZE < DUMP_BUFFER_SIZE_MIN
++#undef	DUMP_BUFFER_SIZE
++#define	DUMP_BUFFER_SIZE DUMP_BUFFER_SIZE_MIN
++#endif
+ 
+ #define DUMP_HEADER_SIZE	DUMP_BUFFER_SIZE
+ 
+ /* standard header definitions */
+ #define DUMP_MAGIC_NUMBER	0xa8190173618f23edULL  /* dump magic number */
+ #define DUMP_MAGIC_LIVE		0xa8190173618f23cdULL  /* live magic number */
+-#define DUMP_VERSION_NUMBER	0x8	/* dump version number              */
++#define DUMP_VERSION_NUMBER	0x9	/* dump version number              */
+ #define DUMP_PANIC_LEN		0x100	/* dump panic string length         */
+ 
+ /* dump levels - type specific stuff added later -- add as necessary */
+@@ -240,6 +247,9 @@
+ 
+ 	/* any additional flags */
+ 	u32	dh_dump_device;
++
++	/* size of dump buffer */
++	u64	dh_dump_buffer_size;
+ } __attribute__((packed));
+ 
+ /*
+

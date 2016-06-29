@@ -1,0 +1,50 @@
+From jasonuhl@sgi.com Thu Nov 18 18:32:12 2004
+Date: Thu, 18 Nov 2004 18:32:12 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Reduce stack usage in lcrash_init_dump_header()
+Message-ID: <20041119023212.GC58328@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.4.2i
+Status: RO
+Content-Length: 1428
+Lines: 35
+
+This kills an array which was consuming an excessive amount of stack
+space on systems where NR_CPUS is large.
+
+Index: linux/drivers/dump/dump_fmt.c
+===================================================================
+--- linux.orig/drivers/dump/dump_fmt.c	2004-11-18 18:07:38.128685464 -0800
++++ linux/drivers/dump/dump_fmt.c	2004-11-18 18:12:07.164758263 -0800
+@@ -93,7 +93,6 @@
+ static int lcrash_init_dump_header(const char *panic_str)
+ {
+ 	struct timeval dh_time;
+-	unsigned long temp_dha_stack[NR_CPUS];
+ 	u64 temp_memsz = dump_header.dh_memory_size;
+ 
+ 	/* make sure the dump header isn't TOO big */
+@@ -106,13 +105,14 @@
+ 
+ 	/* initialize the dump headers to zero */
+ 	/* save dha_stack pointer because it may contains pointer for stack! */
+-	memcpy(&(temp_dha_stack[0]), &(dump_header_asm.dha_stack[0]),
+-		NR_CPUS * sizeof(unsigned long));
+ 	memset(&dump_header, 0, sizeof(dump_header));
+-	memset(&dump_header_asm, 0, sizeof(dump_header_asm));
++	memset(&dump_header_asm, 0,
++		offsetof(struct __dump_header_asm, dha_stack));
++	memset(&dump_header_asm.dha_stack+1, 0,
++		sizeof(dump_header_asm) -
++		offsetof(struct __dump_header_asm, dha_stack) -
++		sizeof(dump_header_asm.dha_stack));
+ 	dump_header.dh_memory_size = temp_memsz;
+-	memcpy(&(dump_header_asm.dha_stack[0]), &(temp_dha_stack[0]),
+-		NR_CPUS * sizeof(unsigned long));
+ 
+ 	/* configure dump header values */
+ 	dump_header.dh_magic_number = DUMP_MAGIC_NUMBER;
+

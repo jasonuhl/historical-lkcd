@@ -1,0 +1,57 @@
+From jasonuhl@sgi.com Sun Jul 31 09:41:55 2005
+Date: Sun, 31 Jul 2005 09:41:55 -0700
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Fix hugetlb page filtration
+Message-ID: <20050731164155.GA615353@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 1623
+Lines: 42
+
+The dump filters currently treat hugetlb pages as kernel pages, even
+though they only ever contain user data.  This can lead to
+prohibitively long dump times, especially on large systems which may
+have the majority of their memory reserved for use as huge pages.
+
+The following fixes the filters so huge pages which contain user data
+(i.e. pages which serve as backing store for hugetlbfs files) get
+dumped at DUMP_LEVEL_USED, and free huge pages get dumped at
+DUMP_LEVEL_ALL_RAM.  This makes the filter semantics the same for
+hugetlbfs as they currently are for tmpfs/ramfs.
+
+
+Index: linux/drivers/dump/dump_filters.c
+===================================================================
+--- linux.orig/drivers/dump/dump_filters.c	2005-07-30 18:27:38.981401714 -0700
++++ linux/drivers/dump/dump_filters.c	2005-07-31 08:52:40.488230442 -0700
+@@ -56,18 +56,21 @@
+ 
+ static inline int kernel_page(struct page *p)
+ {
+-	/* FIXME: Need to exclude hugetlb pages. Clue: reserved but inuse */
+-	return (PageReserved(p) && !PageInuse(p)) || (!PageLRU(p) && PageInuse(p));
++	return (PageReserved(p) && !PageInuse(p)) ||
++		(!PageLRU(p) && !PageCompound(p) && PageInuse(p));
+ }
+ 
+ static inline int user_page(struct page *p)
+ {
+-	return PageInuse(p) && (!PageReserved(p) && PageLRU(p));
++	return PageInuse(p) && !PageReserved(p) &&
++		(PageLRU(p) ||
++		(PageCompound(p) && ((struct page *)p->private)->mapping));
+ }
+ 
+ static inline int unreferenced_page(struct page *p)
+ {
+-	return !PageInuse(p) && !PageReserved(p);
++	return (!PageInuse(p) && !PageReserved(p)) ||
++		(PageCompound(p) && !((struct page *)p->private)->mapping);
+ }
+ 
+ 
+

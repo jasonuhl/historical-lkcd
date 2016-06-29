@@ -1,0 +1,170 @@
+From jasonuhl@sgi.com Mon Mar  7 19:42:32 2005
+Date: Mon, 7 Mar 2005 19:42:32 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: LKCD and KDB interoperability on ia64
+Message-ID: <20050308034232.GD98711@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 4801
+Lines: 155
+
+The following makes it possible to dump from inside a KDB session on
+ia64 (by invoking LKCD with the KDB command "sr d", for example),
+assuming we're using a dump method which works reliably from that
+state (i.e. polling I/O).  This mainly just involves not trying to
+silence all of the cpus if we're in KDB, since they're already under
+KDB control.  We also have to jump through a few hoops to save the
+right information so lcrash can perform stack traces later (since KDB
+synthesizes switch_stacks for running tasks for us).
+
+This shouldn't be integrated quite yet, since it requires some changes
+on the KDB side (which I've also included below).  Once those changes
+are in a released version of the KDB patch, I'll resubmit.
+
+Index: linux/drivers/dump/dump_ia64.c
+===================================================================
+--- linux.orig/drivers/dump/dump_ia64.c	2005-03-07 13:54:09.842840111 -0800
++++ linux/drivers/dump/dump_ia64.c	2005-03-07 17:41:23.679179283 -0800
+@@ -33,6 +33,10 @@
+ #include <asm/hardirq.h>
+ #include <linux/irq.h>
+ #include <linux/delay.h>
++#ifdef CONFIG_KDB
++#include <linux/kdb.h>
++#include <linux/kdbprivate.h>
++#endif
+ 
+ static __s32         saved_irq_count;   /* saved preempt_count() flags */
+ 
+@@ -103,6 +107,20 @@
+ 		dump_header_asm.dha_smp_regs[cpu] = *regs;
+ 	}
+ 
++#ifdef CONFIG_KDB
++	if(KDB_IS_RUNNING()) {
++		struct kdb_running_process *krp = &kdb_running_process[cpu];
++
++		if (tsk && dump_header_asm.dha_stack[cpu]) {
++			memcpy((void *)dump_header_asm.dha_stack[cpu],
++				STACK_START_POSITION(tsk),
++				THREAD_SIZE);
++		}
++		dump_header_asm.dha_stack_ptr[cpu] = (uint64_t) krp->arch.sw;
++		return;
++	}
++#endif
++
+ 	/* save a snapshot of the stack in a nice state for unwinding */
+ 	uwargs.cpu = cpu;
+ 	uwargs.tsk = tsk;
+@@ -214,6 +232,34 @@
+ 	return(dump_nmi_callback(regs, cpu));
+ }
+ 
++#ifdef CONFIG_KDB
++/* save registers on other processors, if dumping from kdb */
++static void
++__dump_save_other_cpus_from_kdb(void)
++{
++	int cpu;
++	struct kdb_running_process *krp;
++
++	for (cpu = 0; cpu < num_online_cpus(); cpu++) {
++		if(cpu == smp_processor_id())
++			continue; /* saved by dump_save_this_cpu() */
++		krp = &kdb_running_process[cpu];
++		if (krp->seqno < kdb_seqno - 1 ||
++		    !krp->regs ||
++		    !krp->arch.sw ||
++		    !krp->p ||
++		    kdb_process_cpu(krp->p) != cpu) {
++			printk(KERN_WARNING "No KDB data for cpu %d;"
++			" it will not be in the LKCD dump\n", cpu);
++			continue;
++		}
++
++		dump_save_context(cpu, krp->regs, krp->p);
++
++	}
++}
++#endif /* CONFIG_KDB */
++
+ /* save registers on other processors */
+ void
+ __dump_save_other_cpus(void)
+@@ -222,6 +268,13 @@
+         int other_cpus = num_online_cpus()-1;
+ 	int wait_time = wait_for_dump_ipi;
+ 
++#ifdef CONFIG_KDB
++	if(KDB_IS_RUNNING()) {
++		__dump_save_other_cpus_from_kdb();
++		return;
++	}
++#endif
++
+         if (other_cpus > 0) {
+                 atomic_set(&waiting_for_dump_ipi, other_cpus);
+ 
+@@ -248,7 +301,9 @@
+ 		}
+         }
+ }
+-#endif
++
++#endif /* CONFIG_SMP */
++
+ /*
+  * Kludge - dump from interrupt context is unreliable (Fixme)
+  *
+
+
+
+Index: linux/kdb/kdbmain.c
+===================================================================
+--- linux.orig/kdb/kdbmain.c	2005-03-02 18:48:45.011062199 -0800
++++ linux/kdb/kdbmain.c	2005-03-07 14:27:28.619492934 -0800
+@@ -36,7 +36,7 @@
+ #include <linux/delay.h>
+ #include <linux/nmi.h>
+ #include <linux/ptrace.h>
+-#if defined(CONFIG_DUMP) || defined(CONFIG_DUMP_MODULE)
++#ifdef CONFIG_CRASH_DUMP
+ #include <linux/dump.h>
+ #endif
+ 
+@@ -1065,7 +1065,7 @@
+ static void
+ kdb_do_dump(struct pt_regs *regs)
+ {
+-#if defined(CONFIG_DUMP) || defined(CONFIG_DUMP_MODULE)
++#ifdef CONFIG_CRASH_DUMP
+ 	kdb_printf("Forcing dump (if configured)\n");
+ 	console_loglevel = 8;	/* to see the dump messages */
+ 	dump("kdb_do_dump", regs);
+@@ -3891,3 +3891,4 @@
+ EXPORT_SYMBOL(kdb_symbol_print);
+ EXPORT_SYMBOL(kdb_notifier_list);
+ EXPORT_SYMBOL(kdb_current_task);
++EXPORT_SYMBOL(kdb_running_process);
+Index: linux/arch/ia64/Kconfig.debug
+===================================================================
+--- linux.orig/arch/ia64/Kconfig.debug	2005-03-02 18:48:48.110697136 -0800
++++ linux/arch/ia64/Kconfig.debug	2005-03-02 18:55:42.423683709 -0800
+@@ -161,8 +161,8 @@
+ 	  This integer controls the behaviour of kdb when the kernel gets a
+ 	  catastrophic error, i.e. for a panic, oops, NMI or other watchdog
+ 	  tripping.  CONFIG_KDB_CONTINUE_CATASTROPHIC interacts with
+-	  /proc/sys/kernel/kdb and CONFIG_DUMP (if your kernel has the LKCD
+-	  patch).
++	  /proc/sys/kernel/kdb and CONFIG_CRASH_DUMP (if your kernel has the
++	  LKCD patch).
+ 	  When KDB is active (/proc/sys/kernel/kdb == 1) and a catastrophic
+ 	  error occurs, nothing extra happens until you type 'go'.
+ 	  CONFIG_KDB_CONTINUE_CATASTROPHIC == 0 (default).  The first time
+
+

@@ -1,0 +1,38 @@
+From jasonuhl@sgi.com Sat Feb 12 00:09:45 2005
+Date: Sat, 12 Feb 2005 00:09:45 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: Troy Heber <troy.heber@hp.com>
+Cc: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Accelerate gzip dumps
+Message-ID: <20050212080945.GA473110@dragonfly.engr.sgi.com>
+References: <20050210221556.GN29315@me> <20050211104649.GA392879@dragonfly.engr.sgi.com> <20050211140731.GQ29315@me>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+In-Reply-To: <20050211140731.GQ29315@me>
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 791
+Lines: 20
+
+As promised, this gives a big speed boost (~300% on a typical SGI
+Altix) to gzip dumps, at only a marginal cost in dump size.
+
+It also removes an incorrect comment (we don't fall back to RLE in the
+indicated case).
+
+Index: linux/drivers/dump/dump_gzip.c
+===================================================================
+--- linux.orig/drivers/dump/dump_gzip.c	2005-02-11 16:12:11.444284482 -0800
++++ linux/drivers/dump/dump_gzip.c	2005-02-11 16:32:28.535116151 -0800
+@@ -48,8 +48,7 @@
+ 		 */
+ 		return(0);
+ 	}
+-	if ((err = zlib_deflateInit(&dump_stream, Z_BEST_COMPRESSION)) != Z_OK) {
+-		/* fall back to RLE compression */
++	if ((err = zlib_deflateInit(&dump_stream, Z_BEST_SPEED)) != Z_OK) {
+ 		printk("dump_compress_gzip(): zlib_deflateInit() "
+ 			"failed (%d)!\n", err);
+ 		return 0;
+

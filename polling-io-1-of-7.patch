@@ -1,0 +1,124 @@
+From jasonuhl@sgi.com Mon Mar  7 19:18:34 2005
+Date: Mon, 7 Mar 2005 19:18:34 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH 1/7] Polling I/O: Userland
+Message-ID: <20050308031834.GA103743@dragonfly.engr.sgi.com>
+References: <20050308031638.GC98711@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+In-Reply-To: <20050308031638.GC98711@dragonfly.engr.sgi.com>
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 5023
+Lines: 107
+
+Userland changes for polling I/O support:  Add comments to the
+relevant config files to document the new config flag (DUMP_FLAGS_POLL),
+and load the scsi_dump module when needed.
+
+I noticed that in the 7.X.X branch, we're not currently documenting
+DUMP_FLAGS_NETDUMP or DUMP_FLAGS_NONDISRUPT in etc.dumputils.conf even
+though the code for them is in the kernel.  I wasn't sure if this was
+a result of a deliberate decision to deprecate those flags, so I've
+left them out.
+
+Index: lkcd/6.0.0/lkcdutils/scripts/sysconfig.dump
+===================================================================
+--- lkcd.orig/6.0.0/lkcdutils/scripts/sysconfig.dump	2004-10-22 12:59:34.000000000 -0700
++++ lkcd/6.0.0/lkcdutils/scripts/sysconfig.dump	2005-03-06 21:34:37.811166145 -0800
+@@ -1,7 +1,7 @@
+ ## Path:        System/Kernel/LKCD
+ ## Description: Linux Kernel Crash Dump (LKCD) options
+ #
+-# Copyright 1999 Silicon Graphics, Inc. All rights reserved.
++# Copyright 1999-2005 Silicon Graphics, Inc. All rights reserved.
+ #
+ # This file contains the configuration variables for Linux kernel crash
+ # dumps.  The file should reside in /etc/sysconfig/dump, permissions
+@@ -79,13 +79,10 @@
+ #         DUMP_FLAGS_NONE(0x00000000):  No flags are required.
+ #   DUMP_FLAGS_NONDISRUPT(0x00000001):  Do not reboot after dumping;
+ #					continue running.
++#         DUMP_FLAGS_POLL(0x00000004):  Use polling I/O if available.
+ #     DUMP_FLAGS_DISKDUMP(0x80000000):  Dump target is a local block device.
+ #      DUMP_FLAGS_NETDUMP(0x40000000):  Dump target is a network device.
+ # 
+-# Valid combinations:
+-# DUMP_FLAGS_DISKDUMP - Disruptive diskdump
+-# DUMP_FLAGS_DISKDUMP|DUMP_FLAGS_NONDISRUTP - Non disruptive diskdump
+-#
+ # The below option is present only present with lkcd on 2.5 kernels. 
+ # DUMP_FLAGS_NETDUMP - Disruptive netdump
+ #
+Index: lkcd/6.0.0/lkcdutils/scripts/sbin.lkcd
+===================================================================
+--- lkcd.orig/6.0.0/lkcdutils/scripts/sbin.lkcd	2004-10-22 12:59:34.000000000 -0700
++++ lkcd/6.0.0/lkcdutils/scripts/sbin.lkcd	2005-03-07 17:55:27.297628254 -0800
+@@ -2,7 +2,7 @@
+ #
+ # Crash dump initialization script.
+ #
+-# Copyright 1999 Silicon Graphics, Inc. All rights reserved.
++# Copyright 1999-2005 Silicon Graphics, Inc. All rights reserved.
+ #
+ 
+ ###########################################################################
+@@ -20,6 +20,7 @@
+ # Copied from incude/linux/dump.h. Any change to this flag in dump.h
+ # should be reflected here.
+ DUMP_FLAGS_SOFTBOOT=0x00000002
++DUMP_FLAGS_POLL=0x00000004
+ DUMP_FLAGS_NETDUMP=0x40000000
+ DUMP_FLAGS_DISKDUMP=0x80000000
+ 
+@@ -73,7 +74,10 @@
+ 		/sbin/modprobe dump_gzip 1>/dev/null 2>&1
+ 	fi
+ 	if [ $(($DUMP_FLAGS & $DUMP_FLAGS_DISKDUMP)) -ne 0 ]; then
+-		/sbin/modprobe dump_blockdev 1>/dev/null 2>&1
++		/sbin/modprobe dump_blockdev 1>/dev/null 2>&1;
++		if [ $(($DUMP_FLAGS & $DUMP_FLAGS_POLL)) -ne 0 ]; then
++			 /sbin/modprobe scsi_dump 1>/dev/null 2>&1
++		fi
+ 	elif [ $(($DUMP_FLAGS & $DUMP_FLAGS_NETDUMP)) -ne 0 ]; then
+ 		/sbin/modprobe dump_netdev 1>/dev/null 2>&1
+ 	fi
+Index: lkcd/7.X.X/lkcdutils/dumputils/etc.dumputils.conf
+===================================================================
+--- lkcd.orig/7.X.X/lkcdutils/dumputils/etc.dumputils.conf	2005-03-06 21:25:54.105752776 -0800
++++ lkcd/7.X.X/lkcdutils/dumputils/etc.dumputils.conf	2005-03-07 11:08:53.563331333 -0800
+@@ -1,5 +1,5 @@
+ #
+-# Copyright 1999 Silicon Graphics, Inc. All rights reserved.
++# Copyright 1999-2005 Silicon Graphics, Inc. All rights reserved.
+ #
+ # This file contains the configuration variables for Linux kernel crash
+ # dumps.  The file should reside in /etc/dumputils.conf, with permissions
+@@ -91,9 +91,9 @@
+ # 2.6 kernels expect to see DUMP_FLAGS as a hex number. 
+ #
+ # DUMP_FLAGS are the flag parameters to use when configuring system dumps.
+-# There are multiple values coming, but for now, the only valid value is
+-#
+-#         DUMP_FLAGS=0x80000000
++# The table includes:
++#     DUMP_FLAGS_DISKDUMP(0x80000000):  Dump target is a local block device.
++#         DUMP_FLAGS_POLL(0x00000004):  Use polling I/O if available.
+ #
+ # ---------------------------------------------------------------------------
+ # DUMP_SAVE defines whether to save the memory image to disk or not.
+Index: lkcd/7.X.X/lkcdutils/dumputils/etc.modprobe.d.dumputils
+===================================================================
+--- lkcd.orig/7.X.X/lkcdutils/dumputils/etc.modprobe.d.dumputils	2004-12-21 15:26:17.000000000 -0800
++++ lkcd/7.X.X/lkcdutils/dumputils/etc.modprobe.d.dumputils	2005-03-07 11:50:18.821335030 -0800
+@@ -2,6 +2,6 @@
+ alias char-major-10-230 dump_blockdev
+ 
+ # Dump compression modules are not loaded automatically
+-install dump_blockdev /sbin/modprobe dump_gzip;  /sbin/modprobe --ignore-install dump_blockdev
++install dump_blockdev /sbin/modprobe dump_gzip;  /sbin/modprobe --ignore-install dump_blockdev; /sbin/modprobe -q scsi_dump
+ 
+ remove dump_blockdev /sbin/modprobe -r --ignore-remove dump_blockdev && /sbin/modprobe -r dump_gzip
+

@@ -1,0 +1,115 @@
+From jasonuhl@sgi.com Thu Mar 17 13:46:44 2005
+Date: Thu, 17 Mar 2005 13:46:45 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Reset irq affinities properly
+Message-ID: <20050317214644.GA156968@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 3847
+Lines: 100
+
+set_irq_affinity() and reset_irq_affinity() contain an implicit
+assumption that sizeof(cpumask_t) == sizeof(unsigned long), which
+isn't true when NR_CPUS > BITS_PER_LONG.  This was causing us to reset
+the affinities of some irqs to the empty set, which can indirectly
+lead to various kinds of nastiness (e.g. MCAs on ia64 under certain
+conditions).
+
+This is only a problem for interrupt-driven dumps.  When dumping with
+polling I/O we avoid this entire code path since we don't need to care
+about irq affinities at all.
+
+
+Index: linux/drivers/dump/dump_ia64.c
+===================================================================
+--- linux.orig/drivers/dump/dump_ia64.c	2005-03-07 18:39:25.852141476 -0800
++++ linux/drivers/dump/dump_ia64.c	2005-03-13 22:39:34.572815788 -0800
+@@ -147,7 +147,7 @@
+ 	cpumask_t cpu = CPU_MASK_NONE;
+ 
+ 	cpu_set(smp_processor_id(), cpu);
+-        memcpy(saved_affinity, irq_affinity, NR_IRQS * sizeof(unsigned long));
++        memcpy(saved_affinity, irq_affinity, sizeof(saved_affinity));
+         for (i = 0; i < NR_IRQS; i++) {
+                 if (irq_desc[i].handler == NULL)
+                         continue;
+@@ -165,7 +165,7 @@
+ {
+         int i;
+ 
+-        memcpy(irq_affinity, saved_affinity, NR_IRQS * sizeof(unsigned long));
++        memcpy(irq_affinity, saved_affinity, sizeof(saved_affinity));
+         for (i = 0; i < NR_IRQS; i++) {
+                 if (irq_desc[i].handler == NULL)
+                         continue;
+Index: linux/drivers/dump/dump_x8664.c
+===================================================================
+--- linux.orig/drivers/dump/dump_x8664.c	2005-03-02 18:48:52.338271063 -0800
++++ linux/drivers/dump/dump_x8664.c	2005-03-16 17:16:13.949162566 -0800
+@@ -184,7 +184,7 @@
+ 	cpumask_t cpu = CPU_MASK_NONE;
+ 
+ 	cpu_set(smp_processor_id(), cpu); 
+-	memcpy(saved_affinity, irq_affinity, NR_IRQS * sizeof(unsigned long));
++	memcpy(saved_affinity, irq_affinity, sizeof(saved_affinity));
+ 	for (i = 0; i < NR_IRQS; i++) {
+ 		if (irq_desc[i].handler == NULL)
+ 			continue;
+@@ -202,7 +202,7 @@
+ {
+ 	int i;
+ 
+-	memcpy(irq_affinity, saved_affinity, NR_IRQS * sizeof(unsigned long));
++	memcpy(irq_affinity, saved_affinity, sizeof(saved_affinity));
+ 	for (i = 0; i < NR_IRQS; i++) {
+ 		if (irq_desc[i].handler == NULL)
+ 			continue;
+Index: linux/drivers/dump/dump_i386.c
+===================================================================
+--- linux.orig/drivers/dump/dump_i386.c	2005-03-02 18:48:52.311903658 -0800
++++ linux/drivers/dump/dump_i386.c	2005-03-16 17:15:32.996672346 -0800
+@@ -198,7 +198,7 @@
+ 	cpumask_t cpu = CPU_MASK_NONE;
+ 
+ 	cpu_set(smp_processor_id(), cpu);
+-	memcpy(saved_affinity, irq_affinity, NR_IRQS * sizeof(unsigned long));
++	memcpy(saved_affinity, irq_affinity, sizeof(saved_affinity));
+ 	for (i = 0; i < NR_IRQS; i++) {
+ 		if (irq_desc[i].handler == NULL)
+ 			continue;
+@@ -216,7 +216,7 @@
+ {
+ 	int i;
+ 
+-	memcpy(irq_affinity, saved_affinity, NR_IRQS * sizeof(unsigned long));
++	memcpy(irq_affinity, saved_affinity, sizeof(saved_affinity));
+ 	for (i = 0; i < NR_IRQS; i++) {
+ 		if (irq_desc[i].handler == NULL)
+ 			continue;
+Index: linux/drivers/dump/dump_ppc64.c
+===================================================================
+--- linux.orig/drivers/dump/dump_ppc64.c	2005-03-02 18:48:52.324599076 -0800
++++ linux/drivers/dump/dump_ppc64.c	2005-03-16 17:17:24.574752077 -0800
+@@ -154,7 +154,7 @@
+ 	int i;
+ 	irq_desc_t *irq_d;
+ 
+-	memcpy(irq_affinity, saved_affinity, NR_IRQS * sizeof(unsigned long));
++	memcpy(irq_affinity, saved_affinity, sizeof(saved_affinity));
+ 
+ 	for_each_irq(i) {
+ 		irq_d = get_irq_desc(i);
+@@ -182,7 +182,7 @@
+ 
+ 	cpu_set(smp_processor_id(), cpu);
+ 
+-	memcpy(saved_affinity, irq_affinity, NR_IRQS * sizeof(unsigned long));
++	memcpy(saved_affinity, irq_affinity, sizeof(saved_affinity));
+ 
+ 	for_each_irq(i) {
+ 		irq_d = get_irq_desc(i);
+

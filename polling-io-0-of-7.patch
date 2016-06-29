@@ -1,0 +1,60 @@
+From jasonuhl@sgi.com Mon Mar  7 19:16:38 2005
+Date: Mon, 7 Mar 2005 19:16:39 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH 0/7] Polling I/O support
+Message-ID: <20050308031638.GC98711@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+X-Status: A
+Content-Length: 1709
+Lines: 44
+
+This patchset adds support for dumping using polling I/O (i.e. with
+interrupts disabled), which will allow LKCD to work in situations
+where we can't rely on interrupts.  This is based on prior patches
+from Mohamed Abbas, which in turn are based on lkdump.
+
+The only low-level drivers I'm including here are the ones I've
+personally tested.  However, this code exposes the same API to drivers
+as lkdump does, so any driver that works with lkdump will probably
+just work with LKCD as well.
+
+
+[PATCH 1/7] Polling I/O: Userland
+	Userland changes for polling I/O support:  Add comments to
+	the relevant config files to document the new config flag
+	(DUMP_FLAGS_POLL), and load the scsi_dump module when
+	needed.
+
+[PATCH 2/7] Polling I/O: Core
+	Core support for polling I/O.  This provides the
+	infrastructure for polling mode dump types to be registered
+	(using an interface compatible with diskdump) and dumped to,
+	if the user has set the DUMP_FLAGS_POLL flag.  (If the flag
+	is not set, or the dump device doesn't support polling I/O,
+	we fall back to a traditional interrupt-driven dump.)
+
+[PATCH 3/7] Polling I/O: SCSI
+	Support for dumping to SCSI devices in polling mode.  For
+	this to be useful, the low level driver for the desired
+	target device needs to provide the necessary entry points
+	(.dump_poll, at minimum).
+
+[PATCH 4/7] Polling I/O: qla1280 support
+	Polling I/O support for QLogic QLA1280 (Ultra2) and QLA12160
+	(Ultra3).
+
+[PATCH 5/7] Polling I/O: qla2xxx support
+	Polling I/O support for QLogic ISP2x00.
+
+[PATCH 6/7] Polling I/O: sata_vsc support
+	Polling I/O support for Vitesse VSC7174 4 port DPA SATA.
+
+[PATCH 7/7] Polling I/O: fusion support
+	Polling I/O support for LSI Logic Fusion MPT.
+
+

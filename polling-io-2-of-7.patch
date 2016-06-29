@@ -1,0 +1,1333 @@
+From jasonuhl@sgi.com Mon Mar  7 19:19:33 2005
+Date: Mon, 7 Mar 2005 19:19:33 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: Re: [PATCH 2/7] Polling I/O: Core
+Message-ID: <20050308031933.GB103743@dragonfly.engr.sgi.com>
+References: <20050308031638.GC98711@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+In-Reply-To: <20050308031638.GC98711@dragonfly.engr.sgi.com>
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 37263
+Lines: 1316
+
+Core support for polling I/O.  This provides the infrastructure for
+polling mode dump types to be registered (using an interface
+compatible with diskdump) and dumped to, if the user has set the
+DUMP_FLAGS_POLL flag.  (If the flag is not set, or the dump device
+doesn't support polling I/O, we fall back to a traditional
+interrupt-driven dump.)
+
+Index: linux/include/linux/workqueue.h
+===================================================================
+--- linux.orig/include/linux/workqueue.h	2004-10-18 14:54:54.000000000 -0700
++++ linux/include/linux/workqueue.h	2005-03-07 13:47:56.593559206 -0800
+@@ -86,4 +86,7 @@
+ 	return ret;
+ }
+ 
++extern void dump_clear_workqueue(void);
++extern void dump_run_workqueue(void);
++
+ #endif
+Index: linux/include/asm-ppc64/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-ppc64/diskdump.h	2005-03-07 13:47:56.612114051 -0800
+@@ -0,0 +1,33 @@
++#ifndef _ASM_PPC64_DISKDUMP_H_
++#define _ASM_PPC64_DISKDUMP_H_
++
++/*
++ * linux/include/asm-ppc64/diskdump.h
++ *
++ * Copyright (c) 2004 FUJITSU LIMITED
++ * Copyright (c) 2003 Red Hat, Inc. All rights reserved.
++ */
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ */
++
++#ifdef __KERNEL__
++
++#include <asm/crashdump.h>
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_PPC64_DISKDUMP_H_ */
+Index: linux/include/linux/timer.h
+===================================================================
+--- linux.orig/include/linux/timer.h	2004-10-18 14:54:40.000000000 -0700
++++ linux/include/linux/timer.h	2005-03-07 13:47:56.618950046 -0800
+@@ -99,4 +99,7 @@
+ extern void run_local_timers(void);
+ extern void it_real_fn(unsigned long);
+ 
++extern void dump_clear_timers(void);
++extern void dump_run_timers(void);
++
+ #endif
+Index: linux/kernel/timer.c
+===================================================================
+--- linux.orig/kernel/timer.c	2005-03-07 13:02:41.913799392 -0800
++++ linux/kernel/timer.c	2005-03-07 13:47:56.632622037 -0800
+@@ -31,6 +31,8 @@
+ #include <linux/time.h>
+ #include <linux/jiffies.h>
+ #include <linux/cpu.h>
++#include <linux/delay.h>
++#include <linux/diskdump.h>
+ #include <linux/syscalls.h>
+ 
+ #include <asm/uaccess.h>
+@@ -434,8 +436,9 @@
+ static inline void __run_timers(tvec_base_t *base)
+ {
+ 	struct timer_list *timer;
++	unsigned long flags;
+ 
+-	spin_lock_irq(&base->lock);
++	spin_lock_irqsave(&base->lock, flags);
+ 	while (time_after_eq(jiffies, base->timer_jiffies)) {
+ 		struct list_head work_list = LIST_HEAD_INIT(work_list);
+ 		struct list_head *head = &work_list;
+@@ -464,14 +467,14 @@
+ 			set_running_timer(base, timer);
+ 			smp_wmb();
+ 			timer->base = NULL;
+-			spin_unlock_irq(&base->lock);
++			spin_unlock_irqrestore(&base->lock, flags);
+ 			fn(data);
+ 			spin_lock_irq(&base->lock);
+ 			goto repeat;
+ 		}
+ 	}
+ 	set_running_timer(base, NULL);
+-	spin_unlock_irq(&base->lock);
++	spin_unlock_irqrestore(&base->lock, flags);
+ }
+ 
+ #ifdef CONFIG_NO_IDLE_HZ
+@@ -1115,6 +1118,12 @@
+ 	struct timer_list timer;
+ 	unsigned long expire;
+ 
++	if (crashdump_mode()) {
++		diskdump_mdelay(timeout);
++		set_current_state(TASK_RUNNING);
++		return timeout;
++	}
++
+ 	switch (timeout)
+ 	{
+ 	case MAX_SCHEDULE_TIMEOUT:
+@@ -1317,7 +1326,7 @@
+ 	return 0;
+ }
+ 
+-static void __devinit init_timers_cpu(int cpu)
++static void /* __devinit */ init_timers_cpu(int cpu)
+ {
+ 	int j;
+ 	tvec_base_t *base;
+@@ -1336,6 +1345,27 @@
+ 	base->timer_jiffies = jiffies;
+ }
+ 
++static tvec_base_t saved_tvec_base;
++
++void dump_clear_timers(void)
++{
++	tvec_base_t *base = &per_cpu(tvec_bases, smp_processor_id());
++
++	memcpy(&saved_tvec_base, base, sizeof(saved_tvec_base));
++	init_timers_cpu(smp_processor_id());
++}
++
++EXPORT_SYMBOL_GPL(dump_clear_timers);
++
++void dump_run_timers(void)
++{
++	tvec_base_t *base = &__get_cpu_var(tvec_bases);
++
++	__run_timers(base);
++}
++
++EXPORT_SYMBOL_GPL(dump_run_timers);
++
+ #ifdef CONFIG_HOTPLUG_CPU
+ static int migrate_timer_list(tvec_base_t *new_base, struct list_head *head)
+ {
+@@ -1620,6 +1650,11 @@
+ {
+ 	unsigned long timeout = msecs_to_jiffies(msecs) + 1;
+ 
++	if (crashdump_mode()) {
++		while (msecs--) udelay(1000);
++		return;
++	}
++
+ 	while (timeout) {
+ 		set_current_state(TASK_UNINTERRUPTIBLE);
+ 		timeout = schedule_timeout(timeout);
+Index: linux/include/linux/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/linux/diskdump.h	2005-03-07 13:47:56.653130022 -0800
+@@ -0,0 +1,99 @@
++#ifndef _LINUX_DISKDUMP_H
++#define _LINUX_DISKDUMP_H
++
++/*
++ * linux/include/linux/diskdump.h
++ *
++ * Copyright (c) 2004 FUJITSU LIMITED
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ */
++
++#include <linux/list.h>
++#include <linux/blkdev.h>
++#include <linux/utsname.h>
++#include <linux/device.h>
++#include <linux/nmi.h>
++#include <linux/dump.h>
++
++/* The minimum dump I/O unit.  Must be the same as PAGE_SIZE. */
++#define DUMP_BLOCK_SIZE		PAGE_SIZE
++#define DUMP_BLOCK_SHIFT	PAGE_SHIFT
++
++#define pr_err(fmt,arg...) \
++	printk(KERN_ERR fmt,##arg)
++
++#define pr_warn(fmt,arg...) \
++	printk(KERN_WARNING fmt,##arg)
++
++#define crashdump_mode()       unlikely(dump_polling_oncpu)
++
++extern unsigned long dump_polling_oncpu;
++
++
++struct disk_dump_partition;
++struct disk_dump_device;
++
++struct disk_dump_type {
++	void *(*probe)(struct device *);
++	int (*add_device)(struct disk_dump_device *);
++	void (*remove_device)(struct disk_dump_device *);
++	struct module *owner;
++	struct list_head list;
++};
++
++struct disk_dump_device_ops {
++	int (*quiesce)(struct disk_dump_device *);
++	int (*shutdown)(struct disk_dump_device *);
++	int (*rw_block)(struct disk_dump_partition *, int rw, unsigned long block_nr, void *buf, int len);
++};
++
++struct disk_dump_device {
++	struct disk_dump_device_ops ops;
++	struct disk_dump_type *dump_type;
++	void *device;
++	unsigned int max_blocks;
++};
++
++struct disk_dump_partition {
++	struct disk_dump_device *device;
++	struct block_device *bdev;
++	unsigned long start_sect;
++	unsigned long nr_sects;
++};
++
++int register_disk_dump_type(struct disk_dump_type *);
++int unregister_disk_dump_type(struct disk_dump_type *);
++
++void diskdump_update(void);
++
++#define diskdump_mdelay(n) 						\
++({									\
++	unsigned long __ms=(n); 					\
++	while (__ms--) {						\
++		udelay(1000);						\
++		touch_nmi_watchdog();					\
++	}								\
++})
++
++extern enum disk_dump_states {
++	DISK_DUMP_INITIAL,
++	DISK_DUMP_RUNNING,
++	DISK_DUMP_SUCCESS,
++	DISK_DUMP_FAILURE,
++}  disk_dump_state;
++
++#endif /* _LINUX_DISKDUMP_H */
+Index: linux/include/asm-ppc/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-ppc/diskdump.h	2005-03-07 13:47:56.671684867 -0800
+@@ -0,0 +1,6 @@
++#ifndef _ASM_PPC_DISKDUMP_H_
++#define _ASM_PPC_DISKDUMP_H_
++
++#include <asm-generic/diskdump.h>
++
++#endif /* _ASM_PPC_DISKDUMP_H_ */
+Index: linux/drivers/dump/dump_blockdev.c
+===================================================================
+--- linux.orig/drivers/dump/dump_blockdev.c	2005-03-07 13:43:37.438043042 -0800
++++ linux/drivers/dump/dump_blockdev.c	2005-03-07 16:05:08.624795800 -0800
+@@ -1,7 +1,7 @@
+ /*
+  * Implements the dump driver interface for saving a dump to 
+- * a block device through the kernel's generic low level block i/o
+- * routines.
++ * a block device through the kernel's generic low level block I/O
++ * routines, or through polling I/O.
+  *
+  * Started: June 2002 - Mohamed Abbas <mohamed.abbas@intel.com>
+  * 	Moved original lkcd kiobuf dump i/o code from dump_base.c
+@@ -13,10 +13,15 @@
+  * Oct 2002  - Suparna Bhattacharya <suparna@in.ibm.com>
+  * 	Rework to new dumpdev.h structures, implement open/close/
+  * 	silence, misc fixes (blocknr removal, bio_add_page usage)  
++ * Oct 2004 - Mar 2005 - Mohamed Abbas <mohamed.abbas@intel.com>
++ *                       Jason Uhlenkott <jasonuhl@sgi.com>
++ *	Implement polling I/O (adapted from lkdump, with thanks
++ *	to Nobuhiro Tachino).
+  *
+- * Copyright (C) 1999 - 2002 Silicon Graphics, Inc. All rights reserved.
++ * Copyright (C) 1999 - 2005 Silicon Graphics, Inc. All rights reserved.
+  * Copyright (C) 2001 - 2002 Matt D. Robinson.  All rights reserved.
+  * Copyright (C) 2002 International Business Machines Corp. 
++ * Copyright (C) 2004 FUJITSU LIMITED
+  *
+  * This code is released under version 2 of the GNU GPL.
+  */
+@@ -27,10 +32,17 @@
+ #include <linux/init.h>
+ #include <linux/blkdev.h>
+ #include <linux/bio.h>
+-#include <asm/hardirq.h>
++#include <linux/diskdump.h>
+ #include <linux/dump.h>
++#include <linux/delay.h>
++#include <asm/diskdump.h>
++#include <asm/hardirq.h>
+ #include "dump_methods.h"
+ 
++
++/* ----- Support functions for interrupt-driven dumps ----- */
++
++
+ extern void *dump_page_buf;
+ 
+ /* The end_io callback for dump i/o completion */
+@@ -113,7 +125,7 @@
+ 		}
+ 
+ 		if ((unsigned long)buf & bsize) {
+-			printk("map: not aligned \n");
++			printk("map: not aligned\n");
+ 			return -EINVAL;
+ 		}
+ 
+@@ -148,17 +160,166 @@
+ 	kfree(bio);
+ }
+ 
+-/*
+- * Prepares the dump device so we can take a dump later. 
+- * The caller is expected to have filled up the dev_id field in the 
+- * block dump dev structure.
+- *
+- * At dump time when dump_block_write() is invoked it will be too 
+- * late to recover, so as far as possible make sure obvious errors 
+- * get caught right here and reported back to the caller.
+- */
++
++/* ----- Support functions for polling I/O based dumps ----- */
++
++static DECLARE_MUTEX(disk_dump_mutex);
++static LIST_HEAD(disk_dump_types);
++static struct disk_dump_device dump_device;
++static struct disk_dump_partition dump_part;
++static unsigned long long timestamp_base;
++static unsigned long timestamp_hz;
++static unsigned long flags_global;
++static int polling_mode;
++static void dump_blockdev_unconfigure(void);
++
++void diskdump_setup_timestamp(void)
++{
++        unsigned long long t=0;
++
++        platform_timestamp(timestamp_base);
++        udelay(1000000/HZ);
++        platform_timestamp(t);
++        timestamp_hz = (unsigned long)(t - timestamp_base);
++        diskdump_update();
++}
++
++void diskdump_update(void)
++{
++        unsigned long long t=0;
++
++        touch_nmi_watchdog();
++
++        /* update jiffies */
++        platform_timestamp(t);
++        while (t > timestamp_base + timestamp_hz) {
++                timestamp_base += timestamp_hz;
++                jiffies++;
++                platform_timestamp(t);
++        }
++
++        dump_run_timers();
++        dump_run_tasklet();
++        dump_run_workqueue();
++}
++EXPORT_SYMBOL_GPL(diskdump_update);
++
++static void *find_real_device(struct device *dev,
++                              struct disk_dump_type **_dump_type)
++{
++        void *real_device;
++        struct disk_dump_type *dump_type;
++
++        list_for_each_entry(dump_type, &disk_dump_types, list) {
++		real_device = dump_type->probe(dev);
++		if (real_device) {
++                        *_dump_type = dump_type;
++                        return real_device;
++                }
++	}
++	return NULL;
++}
++
++static int register_disk_dump_device(struct device *dev, struct block_device *bdev)
++{
++        struct disk_dump_type *dump_type = NULL;
++        void *real_device;
++        int ret = 0;
++
++	if (!bdev->bd_part)
++		return -EINVAL;
++
++	down(&disk_dump_mutex);
++
++	real_device = find_real_device(dev, &dump_type);
++	if (!real_device) {
++		ret = -ENXIO;
++		goto err;
++        }
++
++	if (dump_device.device == real_device) {
++		ret = -EEXIST;
++		goto err;
++	} else if (dump_device.device) {
++		BUG();
++	}
++
++	dump_device.device = real_device;
++
++	ret = dump_type->add_device(&dump_device);
++	if (ret < 0) {
++		dump_device.device = NULL;
++		goto err;
++	}
++
++	dump_device.dump_type = dump_type;
++	dump_part.device = &dump_device;
++	dump_part.bdev = bdev;
++	dump_part.nr_sects   = bdev->bd_part->nr_sects;
++	dump_part.start_sect = bdev->bd_part->start_sect;
++
++err:
++	up(&disk_dump_mutex);
++	return ret;
++}
++
++static void unregister_disk_dump_device(struct block_device *bdev)
++{
++	struct disk_dump_type *dump_type;
++
++	down(&disk_dump_mutex);
++
++	if(!dump_part.device) {
++		up(&disk_dump_mutex);
++		return;
++	}
++
++	BUG_ON(dump_part.device != &dump_device);
++	BUG_ON(dump_part.bdev != bdev);
++
++	dump_part.device = NULL;
++	dump_part.bdev = NULL;
++
++	dump_type = dump_device.dump_type;
++	dump_type->remove_device(&dump_device);
++	dump_device.device = NULL;
++	dump_device.dump_type = NULL;
++
++	up(&disk_dump_mutex);
++}
++
++int register_disk_dump_type(struct disk_dump_type *dump_type)
++{
++	down(&disk_dump_mutex);
++	list_add(&dump_type->list, &disk_dump_types);
++	up(&disk_dump_mutex);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(register_disk_dump_type);
++
++int unregister_disk_dump_type(struct disk_dump_type *dump_type)
++{
++	lock_kernel(); /* guard against the dump ioctl */
++
++	if (dump_device.dump_type == dump_type)
++		dump_blockdev_unconfigure();
++
++	down(&disk_dump_mutex);
++	list_del(&dump_type->list);
++	up(&disk_dump_mutex);
++
++	unlock_kernel();
++	return 0;
++}
++EXPORT_SYMBOL_GPL(unregister_disk_dump_type);
++
++
++/* --------------------------------------------------- */
++
++
+ static int
+-dump_block_open(struct dump_dev *dev, unsigned long arg)
++dump_block_intr_open(struct dump_dev *dev, unsigned long arg)
+ {
+ 	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
+ 	struct block_device *bdev;
+@@ -237,8 +398,96 @@
+ err:	return retval;
+ }
+ 
++static int
++dump_block_poll_open(struct dump_dev *dev, unsigned long arg)
++{
++	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
++	struct block_device *bdev;
++	int retval = 0;
++        struct device *target = NULL;
++
++	/* make sure this is a valid block device */
++	if (!arg) {
++		retval = -EINVAL;
++		goto err;
++	}
++
++	/* Convert it to the new dev_t format */
++	arg = MKDEV((arg >> OLDMINORBITS), (arg & OLDMINORMASK));
++	
++	/* get a corresponding block_dev struct for this */
++	bdev = bdget((dev_t)arg);
++	if (!bdev) {
++		retval = -ENODEV;
++		goto err;
++	}
++
++	/* get the block device opened */
++	if ((retval = blkdev_get(bdev, O_RDWR | O_LARGEFILE, 0))) {
++		goto err1;
++	}
++
++	dump_bdev->bio = 0;
++	dump_bdev->dev_id = (dev_t)arg;
++	dump_bdev->bdev = bdev;
++
++	/* make a note of the limit */
++	dump_bdev->limit = bdev->bd_inode->i_size;
++
++	target = get_device(bdev->bd_disk->driverfs_dev);
++	if (!target) {
++		retval = -EINVAL;
++		goto err2;
++	}
++	retval = register_disk_dump_device(target,bdev);
++	if (retval == -EEXIST)
++		retval = 0;
++	else if (retval < 0)
++		goto err2;
++
++        printk("Block device (%d,%d) successfully configured for dumping using polling I/O\n",
++		MAJOR((dev_t)arg), MINOR((dev_t)arg));
++
++	/* after opening the block device, return */
++	return retval;
++
++err2:	if (bdev) blkdev_put(bdev);
++		goto err;
++err1:	if (bdev) bdput(bdev);
++err:	return retval;
++}
++
+ /*
+- * Close the dump device and release associated resources
++ * Prepares the dump device so we can take a dump later. 
++ * The caller is expected to have filled up the dev_id field in the 
++ * block dump dev structure.
++ *
++ * At dump time when dump_block_write() is invoked it will be too 
++ * late to recover, so as far as possible make sure obvious errors 
++ * get caught right here and reported back to the caller.
++ */
++static int
++dump_block_open(struct dump_dev *dev, unsigned long arg)
++{
++	if (dump_config.flags & DUMP_FLAGS_POLL) {
++		polling_mode = 1;
++		if (!dump_block_poll_open(dev, arg)) {
++			return 0;
++		} else {
++			/*
++			 * If polling I/O isn't supported by this
++			 * device, fall back to interrupt-driven mode.
++			 */
++			dump_config.flags &= ~DUMP_FLAGS_POLL;
++		}
++	}
++
++	polling_mode = 0;
++	return dump_block_intr_open(dev, arg);
++}
++
++/*
++ * Close the dump device and release associated resources.
+  * Invoked when unconfiguring the dump device.
+  */
+ static int
+@@ -248,23 +497,21 @@
+ 
+ 	/* release earlier bdev if present */
+ 	if (dump_bdev->bdev) {
++		unregister_disk_dump_device(dump_bdev->bdev);
+ 		blkdev_put(dump_bdev->bdev);
+ 		dump_bdev->bdev = NULL;
+ 	}
+ 
+-	dump_free_bio(dump_bdev->bio);
+-	dump_bdev->bio = NULL;
++	if (dump_bdev->bio) {
++		dump_free_bio(dump_bdev->bio);
++		dump_bdev->bio = NULL;
++	}
+ 
+ 	return 0;
+ }
+ 
+-
+-/*
+- * Prepare the dump device for use (silence any ongoing activity
+- * and quiesce state) when the system crashes.
+- */
+ static int
+-dump_block_silence(struct dump_dev *dev)
++dump_block_intr_silence(struct dump_dev *dev)
+ {
+ 	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
+ 	struct request_queue *q = bdev_get_queue(dump_bdev->bdev);
+@@ -303,6 +550,93 @@
+ 	return 0;
+ }
+ 
++static int
++dump_block_poll_silence(struct dump_dev *dev)
++{
++	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
++	int ret;
++
++	local_irq_save(flags_global);
++	preempt_disable();
++
++	touch_nmi_watchdog();
++
++	if (down_trylock(&disk_dump_mutex))
++		return -EBUSY; 
++
++	dump_polling_oncpu = smp_processor_id() + 1;
++
++	/*
++	 * Setup timer/tasklet
++	 */
++	dump_clear_timers();
++	dump_clear_tasklet();
++	dump_clear_workqueue();
++
++	diskdump_setup_timestamp();
++
++	BUG_ON(dump_part.bdev != dump_bdev->bdev);
++
++	/* 
++	 * Move to a softer level of silencing where no spin_lock_irqs 
++	 * are held on other cpus
++	 */
++	dump_silence_level = DUMP_SOFT_SPIN_CPUS;	
++
++	touch_nmi_watchdog();
++
++	if (dump_device.ops.quiesce)
++		if ((ret = dump_device.ops.quiesce(&dump_device)) < 0) {
++			printk("Quiesce failed. error %d\n", ret);
++			return ret;
++		}
++	touch_nmi_watchdog();
++	printk(KERN_CRIT "Dumping to block device (%d,%d) on CPU %d using polling I/O ...\n",
++	       MAJOR(dump_bdev->dev_id), MINOR(dump_bdev->dev_id),
++	       smp_processor_id());
++
++	return 0;
++}
++
++/*
++ * Prepare the dump device for use (silence any ongoing activity
++ * and quiesce state) when the system crashes.
++ */
++static int
++dump_block_silence(struct dump_dev *dev)
++{
++	if (polling_mode)
++		return dump_block_poll_silence(dev);
++	else
++		return dump_block_intr_silence(dev);
++}
++
++
++static int
++dump_block_intr_resume(struct dump_dev *dev)
++{
++	__dump_irq_restore();
++	return 0;
++}
++
++static int
++dump_block_poll_resume(struct dump_dev *dev)
++{
++	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
++
++	BUG_ON(dump_part.bdev != dump_bdev->bdev);
++
++	if (dump_device.device && dump_device.ops.shutdown)
++		if (dump_device.ops.shutdown(&dump_device))
++			printk("polling dev: adapter shutdown failed.\n");
++
++	dump_polling_oncpu = 0;
++	preempt_enable_no_resched();
++	local_irq_restore(flags_global);
++	up(&disk_dump_mutex);
++	return 0;
++}
++
+ /*
+  * Invoked when dumping is done. This is the time to put things back 
+  * (i.e. undo the effects of dump_block_silence) so the device is 
+@@ -311,8 +645,10 @@
+ static int
+ dump_block_resume(struct dump_dev *dev)
+ {
+-	__dump_irq_restore();
+-	return 0;
++	if (polling_mode)
++		return dump_block_poll_resume(dev);
++	else
++		return dump_block_intr_resume(dev);
+ }
+ 
+ 
+@@ -344,15 +680,9 @@
+ 	return 0;
+ }
+ 
+-/*
+- * Write out a buffer after checking the device limitations, 
+- * sector sizes, etc. Assumes the buffer is in directly mapped 
+- * kernel address space (not vmalloc'ed).
+- *
+- * Returns: number of bytes written or -ERRNO. 
+- */
++
+ static int
+-dump_block_write(struct dump_dev *dev, void *buf, 
++dump_block_intr_write(struct dump_dev *dev, void *buf, 
+ 	unsigned long len)
+ {
+ 	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
+@@ -391,6 +721,61 @@
+ 	return retval;
+ }
+ 
++static int
++dump_block_poll_write(struct dump_dev *dev, void *buf, 
++	unsigned long len)
++{
++	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
++	loff_t offset = dev->curr_offset + dump_bdev->start_offset;
++	int retval = -ENOSPC;
++	int ret;
++
++	if (offset >= dump_bdev->limit) {
++		printk("write: not enough space left on device!\n");
++		goto out;
++	}
++
++	/* don't write more blocks than our max limit */
++	if (offset + len > dump_bdev->limit) 
++		len = dump_bdev->limit - offset;
++
++	if (dump_part.bdev != dump_bdev->bdev) {
++		return -EBUSY;
++		goto out;
++	}
++
++	local_irq_disable();
++	touch_nmi_watchdog();
++	ret = dump_device.ops.rw_block(&dump_part, WRITE, offset >> DUMP_PAGE_SHIFT,
++		buf, len >> DUMP_PAGE_SHIFT);
++	if (ret < 0) {
++		printk("write error\n");
++		goto out;
++	}
++
++	retval = len;
++out:
++	return retval;
++}
++
++/*
++ * Write out a buffer after checking the device limitations, 
++ * sector sizes, etc. Assumes the buffer is in directly mapped 
++ * kernel address space (not vmalloc'ed).
++ *
++ * Returns: number of bytes written or -ERRNO. 
++ */
++static int
++dump_block_write(struct dump_dev *dev, void *buf, 
++	unsigned long len)
++{
++	if (polling_mode)
++		return dump_block_poll_write(dev, buf, len);
++	else
++		return dump_block_intr_write(dev, buf, len);
++}
++
++
+ /*
+  * Name: dump_block_ready()
+  * Func: check if the last dump i/o is over and ready for next request
+@@ -398,8 +783,14 @@
+ static int
+ dump_block_ready(struct dump_dev *dev, void *buf)
+ {
+-	struct dump_blockdev *dump_bdev = DUMP_BDEV(dev);
+-	request_queue_t *q = bdev_get_queue(dump_bdev->bio->bi_bdev);
++	struct dump_blockdev *dump_bdev;
++	request_queue_t *q;
++
++	if (polling_mode)
++		return 0;
++
++	dump_bdev = DUMP_BDEV(dev);
++	q = bdev_get_queue(dump_bdev->bio->bi_bdev);
+ 
+ 	/* check for io completion */
+ 	if (dump_bdev->err == -EAGAIN) {
+@@ -442,6 +833,18 @@
+ 	
+ struct dump_blockdev *dump_blockdev = &default_dump_blockdev;
+ 
++/*
++ * Unregister and reregister ourselves.  This has the side effect
++ * of unconfiguring the current dump device.
++ */
++static void
++dump_blockdev_unconfigure(void)
++{
++	dump_unregister_device(&dump_blockdev->ddev);
++	if (dump_register_device(&dump_blockdev->ddev) < 0)
++		printk("block device driver registration failed\n");
++}
++
+ static int __init
+ dump_blockdev_init(void)
+ {
+Index: linux/kernel/sched.c
+===================================================================
+--- linux.orig/kernel/sched.c	2005-03-07 13:43:38.356019589 -0800
++++ linux/kernel/sched.c	2005-03-07 13:47:56.700981989 -0800
+@@ -57,6 +57,8 @@
+ /* used to soft spin in sched while dump is in progress */
+ unsigned long dump_oncpu;
+ EXPORT_SYMBOL(dump_oncpu);
++unsigned long dump_polling_oncpu;
++EXPORT_SYMBOL(dump_polling_oncpu);
+ 
+ /*
+  * Convert user-nice values [ -20 ... 0 ... 19 ]
+Index: linux/include/asm-i386/crashdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-i386/crashdump.h	2005-03-07 13:47:56.719536834 -0800
+@@ -0,0 +1,35 @@
++#ifndef _ASM_I386_CRASHDUMP_H
++#define _ASM_I386_CRASHDUMP_H
++
++/*
++ * linux/include/asm-i386/crashdump.h
++ *
++ * Copyright (c) 2003, 2004 Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ */
++
++#ifdef __KERNEL__
++
++#include <asm/irq.h>
++
++#define platform_timestamp(x) rdtscll(x)
++
++
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_I386_CRASHDUMP_H */
+Index: linux/include/asm-ppc64/crashdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-ppc64/crashdump.h	2005-03-07 13:47:56.732232254 -0800
+@@ -0,0 +1,35 @@
++#ifndef _ASM_PPC64_CRASHDUMP_H
++#define _ASM_PPC64_CRASHDUMP_H
++
++/*
++ * linux/include/asm-ppc64/crashdump.h
++ *
++ * Copyright (c) 2003, 2004 Red Hat, Inc. All rights reserved.
++ * Copyright (C) 2004 IBM Corp.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ */
++
++#ifdef __KERNEL__
++
++#include <asm/time.h>
++
++#define platform_timestamp(x) (x = get_tb())
++
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_PPC64_CRASHDUMP_H */
+Index: linux/include/asm-ia64/crashdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-ia64/crashdump.h	2005-03-07 13:47:56.750787098 -0800
+@@ -0,0 +1,36 @@
++#ifndef _ASM_IA64_CRASHDUMP_H
++#define _ASM_IA64_CRASHDUMP_H
++
++/*
++ * linux/include/asm-ia64/crashdump.h
++ *
++ * Copyright (c) 2004 FUJITSU LIMITED
++ * Copyright (c) 2003 Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ */
++
++#ifdef __KERNEL__
++
++#include <asm/ptrace.h>
++
++
++#define platform_timestamp(x) ({ x = ia64_get_itc(); })
++
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_IA64_CRASHDUMP_H */
+Index: linux/include/linux/dump.h
+===================================================================
+--- linux.orig/include/linux/dump.h	2005-03-07 13:44:37.962970912 -0800
++++ linux/include/linux/dump.h	2005-03-07 13:49:51.393356902 -0800
+@@ -117,7 +117,8 @@
+ 
+ /* dump flags - any dump-type specific flags -- add as necessary */
+ #define DUMP_FLAGS_NONE		0x0	/* no flags are set for this dump   */
+-#define DUMP_FLAGS_NONDISRUPT   0X1	/* non-disruptive dumping 	    */
++#define DUMP_FLAGS_NONDISRUPT   0x1	/* non-disruptive dumping 	    */
++#define DUMP_FLAGS_POLL		0x4	/* use polling I/O if available     */
+ 
+ #define DUMP_FLAGS_TARGETMASK	0xf0000000 /* handle special case targets   */
+ #define DUMP_FLAGS_DISKDUMP	0x80000000 /* dump to local disk 	    */
+Index: linux/include/asm-generic/crashdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-generic/crashdump.h	2005-03-07 13:47:56.782037362 -0800
+@@ -0,0 +1,30 @@
++#ifndef _ASM_GENERIC_CRASHDUMP_H_
++#define _ASM_GENERIC_CRASHDUMP_H_
++
++/*
++ * linux/include/asm-generic/crashdump.h
++ *
++ * Copyright (c) 2003, 2004 Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifdef __KERNEL__
++
++#define platform_timestamp(x) do { (x) = 0; } while (0)
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_GENERIC_CRASHDUMP_H */
+Index: linux/include/linux/interrupt.h
+===================================================================
+--- linux.orig/include/linux/interrupt.h	2005-03-07 13:02:41.184300880 -0800
++++ linux/include/linux/interrupt.h	2005-03-07 13:47:56.788873357 -0800
+@@ -268,4 +268,7 @@
+ extern unsigned int probe_irq_mask(unsigned long);	/* returns mask of ISA interrupts */
+ #endif
+ 
++extern void dump_clear_tasklet(void);
++extern void dump_run_tasklet(void);
++
+ #endif
+Index: linux/include/asm-x86_64/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-x86_64/diskdump.h	2005-03-07 13:47:56.807428202 -0800
+@@ -0,0 +1,22 @@
++/*
++ * include/asm-x86_64/diskdump.h
++ *
++ * Copyright (C) Hitachi, Ltd. 2004
++ * Written by Satoshi Oshima (oshima@sdl.hitachi.co.jp)
++ *
++ * Derived from include/asm-i386/diskdump.h
++ * Copyright (c) 2004 FUJITSU LIMITED
++ * Copyright (c) 2003 Red Hat, Inc. All rights reserved.
++ *
++ */
++
++#ifndef _ASM_X86_64_DISKDUMP_H
++#define _ASM_X86_64_DISKDUMP_H
++
++#ifdef __KERNEL__
++
++#include <asm/crashdump.h>
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_X86_64_DISKDUMP_H */
+Index: linux/include/asm-x86_64/crashdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-x86_64/crashdump.h	2005-03-07 13:47:56.820123622 -0800
+@@ -0,0 +1,24 @@
++/*
++ * include/asm-x86_64/crashdump.h
++ *
++ * Copyright (C) Hitachi, Ltd. 2004
++ * Written by Satoshi Oshima (oshima@sdl.hitachi.co.jp)
++ *
++ * Derived from include/asm-i386/diskdump.h
++ * Copyright (c) 2004 FUJITSU LIMITED
++ * Copyright (c) 2003 Red Hat, Inc. All rights reserved.
++ *
++ */
++
++#ifndef _ASM_X86_64_CRASHDUMP_H
++#define _ASM_X86_64_CRASHDUMP_H
++
++#ifdef __KERNEL__
++
++
++#define platform_timestamp(x) rdtscll(x)
++
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_X86_64_CRASHDUMP_H */
+Index: linux/include/asm-generic/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-generic/diskdump.h	2005-03-07 13:47:56.832819041 -0800
+@@ -0,0 +1,6 @@
++#ifndef _ASM_GENERIC_DISKDUMP_H_
++#define _ASM_GENERIC_DISKDUMP_H_
++
++#include <asm-generic/crashdump.h>
++
++#endif /* _ASM_GENERIC_DISKDUMP_H */
+Index: linux/include/asm-ia64/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-ia64/diskdump.h	2005-03-07 13:47:56.845514461 -0800
+@@ -0,0 +1,34 @@
++#ifndef _ASM_IA64_DISKDUMP_H
++#define _ASM_IA64_DISKDUMP_H
++
++/*
++ * linux/include/asm-ia64/diskdump.h
++ *
++ * Copyright (c) 2004 FUJITSU LIMITED
++ * Copyright (c) 2003 Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ */
++
++#ifdef __KERNEL__
++
++#include <asm/crashdump.h>
++
++extern void ia64_do_copy_regs(struct unw_frame_info *, void *arg);
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_IA64_DISKDUMP_H */
+Index: linux/kernel/workqueue.c
+===================================================================
+--- linux.orig/kernel/workqueue.c	2004-10-18 14:55:29.000000000 -0700
++++ linux/kernel/workqueue.c	2005-03-07 13:47:56.852350457 -0800
+@@ -444,6 +444,37 @@
+ 
+ }
+ 
++static struct cpu_workqueue_struct saved_cwq;
++
++void dump_clear_workqueue(void)
++{
++	int cpu = smp_processor_id();
++	struct cpu_workqueue_struct *cwq = keventd_wq->cpu_wq + cpu;
++
++	memcpy(&saved_cwq, cwq, sizeof(saved_cwq));
++	spin_lock_init(&cwq->lock);
++	INIT_LIST_HEAD(&cwq->worklist);
++	init_waitqueue_head(&cwq->more_work);
++	init_waitqueue_head(&cwq->work_done);
++}
++
++void dump_run_workqueue(void)
++{
++	struct cpu_workqueue_struct *cwq;
++
++	cwq = keventd_wq->cpu_wq + smp_processor_id();
++	while (!list_empty(&cwq->worklist)) {
++		struct work_struct *work = list_entry(cwq->worklist.next,
++						struct work_struct, entry);
++		void (*f) (void *) = work->func;
++		void *data = work->data;
++
++		list_del_init(cwq->worklist.next);
++		clear_bit(0, &work->pending);
++		f(data);
++	}
++}
++
+ #ifdef CONFIG_HOTPLUG_CPU
+ /* Take the work from this (downed) CPU. */
+ static void take_over_work(struct workqueue_struct *wq, unsigned int cpu)
+@@ -527,3 +558,6 @@
+ EXPORT_SYMBOL(schedule_delayed_work);
+ EXPORT_SYMBOL(schedule_delayed_work_on);
+ EXPORT_SYMBOL(flush_scheduled_work);
++
++EXPORT_SYMBOL_GPL(dump_clear_workqueue);
++EXPORT_SYMBOL_GPL(dump_run_workqueue);
+Index: linux/include/asm-i386/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-i386/diskdump.h	2005-03-07 13:47:56.865045876 -0800
+@@ -0,0 +1,33 @@
++#ifndef _ASM_I386_DISKDUMP_H
++#define _ASM_I386_DISKDUMP_H
++
++/*
++ * linux/include/asm-i386/diskdump.h
++ *
++ * Copyright (c) 2004 FUJITSU LIMITED
++ * Copyright (c) 2003 Red Hat, Inc. All rights reserved.
++ */
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ */
++
++#ifdef __KERNEL__
++
++#include <asm/crashdump.h>
++
++#endif /* __KERNEL__ */
++
++#endif /* _ASM_I386_DISKDUMP_H */
+Index: linux/kernel/softirq.c
+===================================================================
+--- linux.orig/kernel/softirq.c	2005-03-07 13:02:41.898174256 -0800
++++ linux/kernel/softirq.c	2005-03-07 13:47:56.871881872 -0800
+@@ -323,6 +323,38 @@
+ 
+ EXPORT_SYMBOL(tasklet_kill);
+ 
++struct tasklet_head saved_tasklet;
++
++void dump_clear_tasklet(void)
++{
++	saved_tasklet.list = __get_cpu_var(tasklet_vec).list;
++	__get_cpu_var(tasklet_vec).list = NULL;
++}
++
++EXPORT_SYMBOL_GPL(dump_clear_tasklet);
++
++void dump_run_tasklet(void)
++{
++	struct tasklet_struct *list;
++
++	list = __get_cpu_var(tasklet_vec).list;
++	__get_cpu_var(tasklet_vec).list = NULL;
++
++	while (list) {
++		struct tasklet_struct *t = list;
++		list = list->next;
++
++		if (!atomic_read(&t->count) &&
++		    (test_and_clear_bit(TASKLET_STATE_SCHED, &t->state)))
++				t->func(t->data);
++
++		t->next = __get_cpu_var(tasklet_vec).list;
++		__get_cpu_var(tasklet_vec).list = t;
++	}
++}
++
++EXPORT_SYMBOL_GPL(dump_run_tasklet);
++
+ void __init softirq_init(void)
+ {
+ 	open_softirq(TASKLET_SOFTIRQ, tasklet_action, NULL);
+Index: linux/include/asm-s390/diskdump.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ linux/include/asm-s390/diskdump.h	2005-03-07 13:47:56.890436716 -0800
+@@ -0,0 +1,6 @@
++#ifndef _ASM_S390_DISKDUMP_H_
++#define _ASM_S390_DISKDUMP_H_
++
++#include <asm-generic/diskdump.h>
++
++#endif /* _ASM_S390_DISKDUMP_H_ */
+

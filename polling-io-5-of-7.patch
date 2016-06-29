@@ -1,0 +1,61 @@
+From jasonuhl@sgi.com Mon Mar  7 19:24:38 2005
+Date: Mon, 7 Mar 2005 19:24:38 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH 5/7] Polling I/O: qla2xxx support
+Message-ID: <20050308032438.GE103743@dragonfly.engr.sgi.com>
+References: <20050308031638.GC98711@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+In-Reply-To: <20050308031638.GC98711@dragonfly.engr.sgi.com>
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 1320
+Lines: 44
+
+Polling I/O support for QLogic ISP2x00.
+
+Index: linux/drivers/scsi/qla2xxx/qla_os.c
+===================================================================
+--- linux.orig/drivers/scsi/qla2xxx/qla_os.c	2005-03-07 17:48:57.928132727 -0800
++++ linux/drivers/scsi/qla2xxx/qla_os.c	2005-03-07 17:49:07.509268265 -0800
+@@ -157,6 +157,7 @@
+ static int qla2xxx_eh_host_reset(struct scsi_cmnd *);
+ static int qla2x00_loop_reset(scsi_qla_host_t *ha);
+ static int qla2x00_device_reset(scsi_qla_host_t *, fc_port_t *);
++static void qla2x00_dump_poll(struct scsi_device *sdev);
+ 
+ static int qla2x00_proc_info(struct Scsi_Host *, char *, char **,
+     off_t, int, int);
+@@ -185,6 +186,7 @@
+ 	 * which equates to 0x800000 sectors.
+ 	 */
+ 	.max_sectors		= 0xFFFF,
++	.dump_poll		= qla2x00_dump_poll,
+ };
+ 
+ static struct scsi_transport_template *qla2xxx_transport_template = NULL;
+@@ -1755,6 +1757,21 @@
+ 	return qla2x00_abort_target(reset_fcport);
+ }
+ 
++/*
++ * qla2x00_dump_poll
++ *	Used by LKCD to complete I/O during a crash dump.
++ *
++ * Input:
++ *	sdev = device to which we're dumping.
++ */
++static void
++qla2x00_dump_poll(struct scsi_device *sdev)
++{
++	scsi_qla_host_t *ha = to_qla_host(sdev->host);
++
++	qla2x00_poll(ha);
++}
++
+ /**************************************************************************
+ * qla2xxx_slave_configure
+ *
+

@@ -1,0 +1,71 @@
+From jasonuhl@sgi.com Tue Mar 15 21:23:45 2005
+Date: Tue, 15 Mar 2005 21:23:45 -0800
+From: Jason Uhlenkott <jasonuhl@sgi.com>
+To: lkcd-devel@lists.sourceforge.net
+Subject: [PATCH] Add more types to kerntypes.o
+Message-ID: <20050316052345.GA75661@dragonfly.engr.sgi.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6i
+Status: RO
+Content-Length: 1775
+Lines: 56
+
+The type information included in kerntypes.o is a woefully small
+subset of the types commonly needed for debugging.  We can make it
+much more useful by pulling in a few additional headers.
+
+Index: linux/init/kerntypes.c
+===================================================================
+--- linux.orig/init/kerntypes.c	2005-03-15 16:16:59.028960530 -0800
++++ linux/init/kerntypes.c	2005-03-15 16:42:57.748891993 -0800
+@@ -20,6 +20,36 @@
+ #include <linux/config.h>
+ #include <linux/utsname.h>
+ #include <linux/kernel_stat.h>
++#include <linux/buffer_head.h>
++#include <linux/statfs.h>
++#include <linux/mount.h>
++#include <linux/blkdev.h>
++#include <linux/cdev.h>
++#include <linux/cpu.h>
++#include <linux/dirent.h>
++#include <linux/dnotify.h>
++#include <linux/elevator.h>
++#include <linux/elfcore.h>
++#include <linux/file.h>
++#include <linux/genhd.h>
++#include <linux/icmpv6.h>
++#include <linux/in.h>
++#include <linux/in6.h>
++#include <linux/ipv6.h>
++#include <linux/loop.h>
++#include <linux/mount.h>
++#include <linux/mqueue.h>
++#include <linux/msg.h>
++#include <linux/nfs_fs.h>
++#include <linux/nfs_mount.h>
++#include <linux/nfs_page.h>
++#include <linux/parser.h>
++#include <linux/personality.h>
++#include <linux/route.h>
++#include <linux/shm.h>
++#include <linux/tty.h>
++#include <net/icmp.h>
++#include <net/ip.h>
+ #include <linux/dump.h>
+ 
+ #include <asm/kerntypes.h>
+Index: linux/include/asm-ia64/kerntypes.h
+===================================================================
+--- linux.orig/include/asm-ia64/kerntypes.h	2005-03-15 16:16:58.548487798 -0800
++++ linux/include/asm-ia64/kerntypes.h	2005-03-15 16:19:21.456898427 -0800
+@@ -17,5 +17,6 @@
+ 
+ /* Use the default */
+ #include <asm-generic/kerntypes.h>
++#include <asm/sn/nodepda.h>
+ 
+ #endif /* _IA64_KERNTYPES_H */
+
